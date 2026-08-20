@@ -4,23 +4,24 @@ import ScriptingBridge
 // Minimal typed views of Mail's scripting interface. ScriptingBridge resolves
 // these members dynamically from Mail's scripting definition at runtime; the
 // protocols only exist to satisfy the compiler.
-@objc protocol MailApplicationSB {
+@objc nonisolated protocol MailApplicationSB {
     @objc optional var inbox: SBObject { get }
 }
 
-@objc protocol MailMailboxSB {
+@objc nonisolated protocol MailMailboxSB {
     @objc optional func messages() -> SBElementArray
 }
 
-@objc protocol MailMessageSB {
+@objc nonisolated protocol MailMessageSB {
     @objc optional var id: Int { get }
     @objc optional var messageId: String { get }
     @objc optional var subject: String { get }
     @objc optional var dateReceived: Date { get }
+    @objc optional var source: String { get }
     @objc optional func mailAttachments() -> SBElementArray
 }
 
-@objc protocol MailAttachmentSB {
+@objc nonisolated protocol MailAttachmentSB {
     @objc optional var id: String { get }
     @objc optional var name: String { get }
     @objc optional var fileSize: Int { get }
@@ -29,7 +30,7 @@ import ScriptingBridge
 extension SBApplication: MailApplicationSB {}
 extension SBObject: MailMailboxSB, MailMessageSB, MailAttachmentSB {}
 
-struct InboxAttachment {
+nonisolated struct InboxAttachment: Sendable {
     let id: String
     let name: String
     let fileSize: Int
@@ -39,7 +40,7 @@ struct InboxAttachment {
     }
 }
 
-struct InboxMessage {
+nonisolated struct InboxMessage: Sendable {
     let id: Int
     let messageID: String
     let subject: String
@@ -47,7 +48,7 @@ struct InboxMessage {
     let attachments: [InboxAttachment]
 }
 
-enum MailBridgeError: LocalizedError {
+nonisolated enum MailBridgeError: LocalizedError {
     case scriptError(String)
 
     var errorDescription: String? {
@@ -57,21 +58,20 @@ enum MailBridgeError: LocalizedError {
     }
 }
 
-@MainActor
-enum MailBridge {
+/// Owns all ScriptingBridge access to Mail on its own executor, so Apple-event
+/// round trips (which can take seconds on a large inbox) never block the main
+/// thread and the menu bar UI.
+actor MailWorker {
 
-    static var isMailRunning: Bool {
+    static let shared = MailWorker()
+
+    func isMailRunning() -> Bool {
         SBApplication(bundleIdentifier: "com.apple.mail")?.isRunning ?? false
     }
 
-    // MARK: - Reading (ScriptingBridge)
-
     /// Snapshots inbox messages received after the given date.
-    static func inboxMessages(receivedAfter date: Date) -> [InboxMessage] {
-        guard let app = SBApplication(bundleIdentifier: "com.apple.mail"), app.isRunning,
-              let inbox = (app as MailApplicationSB).inbox,
-              let messages = (inbox as MailMailboxSB).messages?()
-        else { return [] }
+    func newMessages(receivedAfter date: Date) -> [InboxMessage] {
+        guard let messages = inboxMessagesArray() else { return [] }
 
         let recent = messages.filtered(using: NSPredicate(format: "dateReceived > %@", date as NSDate))
 
@@ -100,69 +100,32 @@ enum MailBridge {
         return result.sorted { $0.dateReceived < $1.dateReceived }
     }
 
-    // MARK: - Mutations (parameterized AppleScript)
-    // ScriptingBridge is unreliable for Mail's save/delete/set-content
-    // commands, so these go through small NSAppleScript snippets instead.
-
-    static func saveAttachment(messageID: Int, attachmentID: String, toFile file: URL) throws {
-        let lookup = """
-            set theMessage to first message of inbox whose id is \(messageID)
-            set theAttachment to first mail attachment of theMessage whose id is \(quoted(attachmentID))
-        """
-        do {
-            // Modern Mail expects the full destination file path.
-            try run("""
-            tell application "Mail"
-            \(lookup)
-                save theAttachment in (POSIX file \(quoted(file.path)))
-            end tell
-            """)
-        } catch {
-            // Older Mail versions instead save into a folder, keeping the
-            // attachment's original name.
-            try run("""
-            tell application "Mail"
-            \(lookup)
-                save theAttachment in ((POSIX file \(quoted(file.deletingLastPathComponent().path + "/"))) as alias)
-            end tell
-            """)
+    /// Saves the message's Office/PDF attachments and reports the outcome.
+    /// The message itself is never modified: modern Mail rejects all scripted
+    /// modifications of received messages, so attachments are extracted from
+    /// the raw message source instead.
+    func unload(_ message: InboxMessage) -> ProcessResult {
+        guard let source = messageSource(messageID: message.id), !source.isEmpty else {
+            let reason = "Could not read the raw source of “\(message.subject)” from Mail."
+            return ProcessResult(subject: message.subject, savedCount: 0, failedCount: 1,
+                                 savedFiles: [], failureReasons: [reason])
         }
+        return AttachmentUnloader.process(message, source: source)
     }
 
-    static func messageSource(messageID: Int) throws -> String {
-        let result = try run("""
-        tell application "Mail"
-            set theMessage to first message of inbox whose id is \(messageID)
-            return source of theMessage
-        end tell
-        """)
-        return result.stringValue ?? ""
+    // MARK: - Private
+
+    private func inboxMessagesArray() -> SBElementArray? {
+        guard let app = SBApplication(bundleIdentifier: "com.apple.mail"), app.isRunning,
+              let inbox = (app as MailApplicationSB).inbox
+        else { return nil }
+        return (inbox as MailMailboxSB).messages?()
     }
 
-    // MARK: - Helpers
-
-    /// Escapes a Swift string into an AppleScript string literal.
-    private static func quoted(_ string: String) -> String {
-        "\"" + string
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\r\n", with: "\\n")
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\r", with: "\\r")
-        + "\""
-    }
-
-    @discardableResult
-    private static func run(_ source: String) throws -> NSAppleEventDescriptor {
-        guard let script = NSAppleScript(source: source) else {
-            throw MailBridgeError.scriptError("Could not compile Mail script.")
-        }
-        var errorInfo: NSDictionary?
-        let result = script.executeAndReturnError(&errorInfo)
-        if let errorInfo {
-            let message = errorInfo[NSAppleScript.errorMessage] as? String ?? "Unknown Mail scripting error."
-            throw MailBridgeError.scriptError(message)
-        }
-        return result
+    private func messageSource(messageID: Int) -> String? {
+        guard let messages = inboxMessagesArray() else { return nil }
+        let matches = messages.filtered(using: NSPredicate(format: "id == %d", messageID))
+        guard let message = matches.first as? SBObject else { return nil }
+        return (message as MailMessageSB).source
     }
 }

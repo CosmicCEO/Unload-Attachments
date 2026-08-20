@@ -1,7 +1,7 @@
 import Foundation
 import OSLog
 
-struct ProcessResult {
+nonisolated struct ProcessResult: Sendable {
     let subject: String
     let savedCount: Int
     let failedCount: Int
@@ -9,8 +9,9 @@ struct ProcessResult {
     let failureReasons: [String]
 }
 
-@MainActor
-enum AttachmentUnloader {
+/// Pure helpers for extracting and filing attachments. Runs off the main
+/// thread (called from MailWorker); must not touch main-actor state.
+nonisolated enum AttachmentUnloader {
 
     private static let logger = Logger(subsystem: "com.jerfiss.Unload-Attachments", category: "unloader")
 
@@ -70,49 +71,24 @@ enum AttachmentUnloader {
 
     // MARK: - Processing
 
-    /// Saves each Office/PDF attachment of the message to the destination
-    /// folder. The message itself is left untouched: modern Mail rejects all
-    /// scripted modifications of received messages.
-    static func process(_ message: InboxMessage) async -> ProcessResult {
+    /// Extracts each Office/PDF attachment from the raw message source and
+    /// writes it to the destination folder.
+    static func process(_ message: InboxMessage, source: String) -> ProcessResult {
         var savedCount = 0
         var failedCount = 0
         var savedFiles: [URL] = []
         var failureReasons: [String] = []
-        var messageSourceCache: String?
 
         for attachment in message.attachments where officeExtensions.contains(attachment.fileExtension) {
             do {
                 let destination = try destinationFolder(for: attachment.fileExtension, receivedAt: message.dateReceived)
-
-                // Mail saves with the attachment's original name, so stage in
-                // a private temp folder to avoid clobbering earlier saves.
-                let staging = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("unloader-\(UUID().uuidString)", isDirectory: true)
-                try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
-                defer { try? FileManager.default.removeItem(at: staging) }
-
-                let stagedFile = staging.appendingPathComponent(attachment.name)
-                do {
-                    try MailBridge.saveAttachment(messageID: message.id, attachmentID: attachment.id, toFile: stagedFile)
-                } catch {
-                    // Mail's scripted save is broken on modern macOS (-10000);
-                    // extract the attachment from the raw message source instead.
-                    if messageSourceCache == nil {
-                        messageSourceCache = try MailBridge.messageSource(messageID: message.id)
-                    }
-                    guard let source = messageSourceCache,
-                          let data = MIMEExtractor.attachmentData(named: attachment.name, inSource: source) else {
-                        throw MailBridgeError.scriptError("Could not extract \(attachment.name) from the raw message.")
-                    }
-                    try data.write(to: stagedFile)
-                }
-                guard FileManager.default.fileExists(atPath: stagedFile.path) else {
-                    throw MailBridgeError.scriptError("Mail did not write \(attachment.name).")
+                guard let data = MIMEExtractor.attachmentData(named: attachment.name, inSource: source) else {
+                    throw MailBridgeError.scriptError("Could not extract \(attachment.name) from the raw message.")
                 }
 
                 let finalName = timestamp(for: message.dateReceived) + "_" + cleanedFileName(attachment.name)
                 let finalURL = uniqueURL(in: destination, fileName: finalName)
-                try FileManager.default.moveItem(at: stagedFile, to: finalURL)
+                try data.write(to: finalURL, options: [.withoutOverwriting])
 
                 logger.notice("Saved \(finalURL.path, privacy: .public)")
                 savedFiles.append(finalURL)

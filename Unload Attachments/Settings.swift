@@ -1,7 +1,7 @@
 import Foundation
 
 /// How saved attachments are organized under the parent folder.
-enum FolderScheme: String, CaseIterable, Identifiable {
+nonisolated enum FolderScheme: String, CaseIterable, Identifiable {
     case byYear
     case byType
 
@@ -15,7 +15,7 @@ enum FolderScheme: String, CaseIterable, Identifiable {
     }
 }
 
-enum SettingsKeys {
+nonisolated enum SettingsKeys {
     static let monitoringEnabled = "monitoringEnabled"
     static let pollInterval = "pollInterval"
     static let folderScheme = "folderScheme"
@@ -24,7 +24,8 @@ enum SettingsKeys {
     static let processedMessageIDs = "processedMessageIDs"
 }
 
-enum AppSettings {
+// UserDefaults is thread-safe, so these reads are safe from any executor.
+nonisolated enum AppSettings {
     static var pollInterval: TimeInterval {
         let value = UserDefaults.standard.double(forKey: SettingsKeys.pollInterval)
         return value > 0 ? value : 30

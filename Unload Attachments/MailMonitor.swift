@@ -59,7 +59,8 @@ final class MailMonitor {
 
     func pollOnce() async {
         guard !isProcessing else { return }
-        guard MailBridge.isMailRunning else { return }
+        let worker = MailWorker.shared
+        guard await worker.isMailRunning() else { return }
         isProcessing = true
         defer { isProcessing = false }
 
@@ -67,7 +68,7 @@ final class MailMonitor {
         // while a previous poll was running is not missed; the processed-ID
         // list prevents double handling.
         let since = lastProcessedDate.addingTimeInterval(-120)
-        let messages = MailBridge.inboxMessages(receivedAfter: since)
+        let messages = await worker.newMessages(receivedAfter: since)
 
         for message in messages {
             guard !processedMessageIDs.contains(message.messageID) else { continue }
@@ -76,7 +77,7 @@ final class MailMonitor {
                 AttachmentUnloader.officeExtensions.contains($0.fileExtension)
             }
             if hasOffice {
-                let result = await AttachmentUnloader.process(message)
+                let result = await worker.unload(message)
                 var text = "\(result.savedCount) attachment(s) unloaded from “\(result.subject)”"
                 if result.failedCount > 0 { text += " (\(result.failedCount) failed)" }
                 log(text)

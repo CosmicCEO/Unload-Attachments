@@ -1,9 +1,9 @@
 import Foundation
 
-/// Extracts attachment data from a raw RFC 822 message source. This is the
-/// fallback for Mail's scripted `save` command, which fails with
-/// "AppleEvent handler failed" (-10000) on modern macOS versions.
-enum MIMEExtractor {
+/// Extracts attachment data from a raw RFC 822 message source. Mail's
+/// scripted `save` command fails with "AppleEvent handler failed" (-10000)
+/// on modern macOS versions, so this is how attachments are saved.
+nonisolated enum MIMEExtractor {
 
     /// Finds the MIME part whose filename matches and returns its decoded data.
     static func attachmentData(named fileName: String, inSource source: String) -> Data? {
