@@ -164,14 +164,15 @@ nonisolated enum AttachmentUnloader {
             + rows + "</table>"
     }
 
+    /// Plain-text fallback. Deliberately omits the (very long) published
+    /// iCloud URLs — those live only behind the HTML table's link text, so
+    /// plain-text clients aren't flooded with 600-character URLs.
     static func plainSummary(for records: [AttachmentRecord]) -> String {
-        var lines = ["[Unload Attachments]"]
+        var lines = ["[Unload Attachments] Attachments moved out of this email:"]
         for record in records {
             switch record.status {
-            case .saved(let fileURL, let publishedURL):
-                var line = "• \(record.name) (\(record.sizeText)) — saved: \(locationText(for: fileURL))"
-                if let publishedURL { line += " — download: \(publishedURL.absoluteString)" }
-                lines.append(line)
+            case .saved(let fileURL, _):
+                lines.append("• \(record.name) (\(record.sizeText)) — \(locationText(for: fileURL))")
             case .failed(let reason):
                 lines.append("• \(record.name) (\(record.sizeText)) — error, left in email: \(reason)")
             case .leftInPlace:

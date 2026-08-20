@@ -61,17 +61,21 @@ struct MenuBarIcon: View {
 struct MenuContentView: View {
     @Bindable var monitor: MailMonitor
 
-    @AppStorage(SettingsKeys.pollInterval) private var pollInterval = 30.0
     @AppStorage(SettingsKeys.folderScheme) private var folderScheme = FolderScheme.byYear.rawValue
     @AppStorage(SettingsKeys.flagProcessedMessages) private var flagProcessedMessages = true
     @AppStorage(SettingsKeys.originalsPolicy) private var originalsPolicy = OriginalMessagePolicy.archive.rawValue
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
+    init(monitor: MailMonitor) {
+        _monitor = Bindable(wrappedValue: monitor)
+        // Menu-style content is rebuilt each time the menu opens; clearing the
+        // unseen badge here fires reliably on open (unlike .onAppear on a
+        // menu item). Scheduled async so it doesn't mutate state mid-build.
+        Task { @MainActor in monitor.markSeen() }
+    }
+
     var body: some View {
         Toggle("Monitor for New Mail", isOn: $monitor.isMonitoring)
-            // Menu-style content is instantiated on each open, so this fires
-            // exactly when the user opens the menu — clearing the green dot.
-            .onAppear { monitor.markSeen() }
 
         Button("Process Inbox Now") {
             Task { await monitor.processNow() }
@@ -89,13 +93,6 @@ struct MenuContentView: View {
         }
 
         Divider()
-
-        Picker("Check Every", selection: $pollInterval) {
-            Text("15 seconds").tag(15.0)
-            Text("30 seconds").tag(30.0)
-            Text("1 minute").tag(60.0)
-            Text("5 minutes").tag(300.0)
-        }
 
         Picker("Organize Files", selection: $folderScheme) {
             ForEach(FolderScheme.allCases) { scheme in

@@ -120,8 +120,12 @@ nonisolated struct MIMEMessage: Sendable {
 
         if let kept = Self.removing(part: root, path: [], toRemove: paths), Self.hasLeaf(kept) {
             newRoot = kept
+            let htmlPath = Self.firstTextLeafPath(ofType: "text/html", in: newRoot, path: [])
+            let plainPath = Self.firstTextLeafPath(ofType: "text/plain", in: newRoot, path: [])
 
-            if let htmlPath = Self.firstTextLeafPath(ofType: "text/html", in: newRoot, path: []) {
+            if let htmlPath {
+                // The message already has an HTML alternative — inject the
+                // table there, and a short note into the plain part if present.
                 Self.mutateLeaf(at: htmlPath, of: &newRoot) { leaf in
                     let original = leaf.decodedText ?? ""
                     let combined: String
@@ -132,12 +136,27 @@ nonisolated struct MIMEMessage: Sendable {
                     }
                     Self.replaceContent(of: &leaf, type: "text/html", text: combined)
                 }
-            }
-            if let plainPath = Self.firstTextLeafPath(ofType: "text/plain", in: newRoot, path: []) {
+                if let plainPath {
+                    Self.mutateLeaf(at: plainPath, of: &newRoot) { leaf in
+                        let original = leaf.decodedText ?? ""
+                        Self.replaceContent(of: &leaf, type: "text/plain", text: summaryPlain + "\n\n" + original)
+                    }
+                }
+            } else if let plainPath, !plainPath.isEmpty {
+                // Plain-text-only body: upgrade it to multipart/alternative so
+                // the formatted table renders, keeping a clean plain fallback.
                 Self.mutateLeaf(at: plainPath, of: &newRoot) { leaf in
                     let original = leaf.decodedText ?? ""
-                    Self.replaceContent(of: &leaf, type: "text/plain", text: summaryPlain + "\n\n" + original)
+                    let html = summaryHTML
+                        + "<pre style=\"font-family:-apple-system,sans-serif; white-space:pre-wrap;\">"
+                        + Self.escapeHTML(original) + "</pre>"
+                    leaf = Self.alternativePart(plainText: summaryPlain + "\n\n" + original, htmlText: html)
                 }
+            } else if newRoot.isMultipart {
+                // Parts kept but no text body — add the summary as an HTML part.
+                newRoot.subparts.insert(Self.htmlLeaf(summaryHTML), at: 0)
+            } else {
+                Self.replaceContent(of: &newRoot, type: "text/html", text: summaryHTML)
             }
         } else {
             // The message body consisted only of the removed attachment(s):
@@ -198,6 +217,32 @@ nonisolated struct MIMEMessage: Sendable {
                                                        contentType: "\(type); charset=utf-8",
                                                        transferEncoding: "base64")
         leaf.bodyText = MIME.base64Body(text)
+    }
+
+    /// A standalone UTF-8 base64 body part of the given media type.
+    private static func leaf(type: String, text: String) -> MIMEPart {
+        MIMEPart(headerText: "Content-Type: \(type); charset=utf-8\nContent-Transfer-Encoding: base64",
+                 bodyText: MIME.base64Body(text),
+                 subparts: [], boundary: nil, preamble: "", epilogue: "")
+    }
+
+    private static func htmlLeaf(_ html: String) -> MIMEPart {
+        leaf(type: "text/html", text: html)
+    }
+
+    /// A `multipart/alternative` wrapping a plain-text and an HTML rendering.
+    private static func alternativePart(plainText: String, htmlText: String) -> MIMEPart {
+        let boundary = "Unload-Alt-\(UUID().uuidString)"
+        return MIMEPart(headerText: "Content-Type: multipart/alternative; boundary=\"\(boundary)\"",
+                        bodyText: "",
+                        subparts: [leaf(type: "text/plain", text: plainText), htmlLeaf(htmlText)],
+                        boundary: boundary, preamble: "", epilogue: "")
+    }
+
+    private static func escapeHTML(_ string: String) -> String {
+        string.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
     }
 }
 
