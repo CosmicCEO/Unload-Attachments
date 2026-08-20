@@ -6,10 +6,15 @@
 	objectVersion = 110;
 	objects = {
 
+/* Begin PBXFileReference section */
+		62E0517830373A0B00FF6C1E /* Unload.applescript */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.applescript; path = Unload.applescript; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
 /* Begin PBXGroup section */
 		62E051713037395D00FF6C1E = {
 			isa = PBXGroup;
 			children = (
+				62E0517830373A0B00FF6C1E /* Unload.applescript */,
 			);
 			sourceTree = "<group>";
 		};
