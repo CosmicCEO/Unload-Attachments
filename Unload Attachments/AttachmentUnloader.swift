@@ -1,22 +1,11 @@
 import Foundation
 import OSLog
 
-struct AttachmentRecord {
-    enum Status {
-        case saved(URL, publishedURL: URL?, removed: Bool)
-        case failed(String)
-        case leftInPlace
-    }
-
-    let name: String
-    let sizeText: String
-    let status: Status
-}
-
 struct ProcessResult {
     let subject: String
     let savedCount: Int
     let failedCount: Int
+    let savedFiles: [URL]
     let failureReasons: [String]
 }
 
@@ -25,7 +14,7 @@ enum AttachmentUnloader {
 
     private static let logger = Logger(subsystem: "com.jerfiss.Unload-Attachments", category: "unloader")
 
-    /// File types that are saved out of the message and removed from it.
+    /// File types that are saved out of incoming messages.
     static let officeExtensions: Set<String> = ["xls", "xlsx", "doc", "docx", "ppt", "pptx", "pdf"]
 
     private static let typeFolderNames: [String: String] = [
@@ -47,7 +36,8 @@ enum AttachmentUnloader {
     }
 
     /// The parent folder that holds all unloaded attachments. Prefers the
-    /// user-chosen override, then iCloud Drive, then local Documents.
+    /// user-chosen override, then iCloud Drive, then local Documents (which
+    /// is itself iCloud-synced when Desktop & Documents sync is on).
     static var parentFolder: URL {
         if let override = AppSettings.parentFolderOverride { return override }
         if let icloud = iCloudDriveDocumentsURL {
@@ -81,23 +71,16 @@ enum AttachmentUnloader {
     // MARK: - Processing
 
     /// Saves each Office/PDF attachment of the message to the destination
-    /// folder, removes it from the message, and prepends an HTML summary
-    /// table with links to the saved files.
+    /// folder. The message itself is left untouched: modern Mail rejects all
+    /// scripted modifications of received messages.
     static func process(_ message: InboxMessage) async -> ProcessResult {
-        let formatter = ByteCountFormatter()
-        var records: [AttachmentRecord] = []
         var savedCount = 0
         var failedCount = 0
+        var savedFiles: [URL] = []
         var failureReasons: [String] = []
         var messageSourceCache: String?
 
-        for attachment in message.attachments {
-            let sizeText = formatter.string(fromByteCount: Int64(attachment.fileSize))
-            guard officeExtensions.contains(attachment.fileExtension) else {
-                records.append(AttachmentRecord(name: attachment.name, sizeText: sizeText, status: .leftInPlace))
-                continue
-            }
-
+        for attachment in message.attachments where officeExtensions.contains(attachment.fileExtension) {
             do {
                 let destination = try destinationFolder(for: attachment.fileExtension, receivedAt: message.dateReceived)
 
@@ -114,7 +97,6 @@ enum AttachmentUnloader {
                 } catch {
                     // Mail's scripted save is broken on modern macOS (-10000);
                     // extract the attachment from the raw message source instead.
-                    logger.notice("Scripted save failed for \(attachment.name, privacy: .public); extracting from raw source")
                     if messageSourceCache == nil {
                         messageSourceCache = try MailBridge.messageSource(messageID: message.id)
                     }
@@ -132,65 +114,20 @@ enum AttachmentUnloader {
                 let finalURL = uniqueURL(in: destination, fileName: finalName)
                 try FileManager.default.moveItem(at: stagedFile, to: finalURL)
 
-                // The file is safe now — a removal failure downgrades the row
-                // instead of losing the save.
-                var removed = true
-                do {
-                    try MailBridge.deleteAttachment(messageID: message.id, attachmentID: attachment.id)
-                } catch {
-                    removed = false
-                    let reason = "\(attachment.name) was saved, but could not be removed from the email: \(error.localizedDescription)"
-                    logger.error("\(reason, privacy: .public)")
-                    failureReasons.append(reason)
-                }
-
-                let published = await publishedURL(for: finalURL)
-                records.append(AttachmentRecord(name: attachment.name, sizeText: sizeText,
-                                                status: .saved(finalURL, publishedURL: published, removed: removed)))
+                logger.notice("Saved \(finalURL.path, privacy: .public)")
+                savedFiles.append(finalURL)
                 savedCount += 1
             } catch {
                 let reason = "\(attachment.name): \(error.localizedDescription)"
                 logger.error("Failed to unload \(reason, privacy: .public)")
                 failureReasons.append(reason)
-                records.append(AttachmentRecord(name: attachment.name, sizeText: sizeText,
-                                                status: .failed(error.localizedDescription)))
                 failedCount += 1
             }
         }
 
-        if savedCount > 0 {
-            let original = (try? MailBridge.messageContent(messageID: message.id)) ?? ""
-            let table = summaryTable(for: records)
-            do {
-                try MailBridge.setMessageContent(messageID: message.id, content: table + "<br>" + original)
-            } catch {
-                let reason = "Could not add the summary table to the email: \(error.localizedDescription)"
-                logger.error("\(reason, privacy: .public)")
-                failureReasons.append(reason)
-            }
-        }
-
         return ProcessResult(subject: message.subject, savedCount: savedCount,
-                             failedCount: failedCount, failureReasons: failureReasons)
-    }
-
-    // MARK: - iCloud link publishing
-
-    /// Waits for the file's iCloud upload and returns an emailable https
-    /// download URL, or nil when publishing isn't possible (local folder,
-    /// no iCloud, timeout).
-    static func publishedURL(for fileURL: URL, timeout: TimeInterval = 45) async -> URL? {
-        let fileManager = FileManager.default
-        guard fileManager.isUbiquitousItem(at: fileURL) else { return nil }
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            do {
-                return try fileManager.url(forPublishingUbiquitousItemAt: fileURL, expiration: nil)
-            } catch {
-                try? await Task.sleep(for: .seconds(3))
-            }
-        }
-        return nil
+                             failedCount: failedCount, savedFiles: savedFiles,
+                             failureReasons: failureReasons)
     }
 
     // MARK: - Naming
@@ -219,51 +156,5 @@ enum AttachmentUnloader {
             counter += 1
         }
         return candidate
-    }
-
-    // MARK: - HTML summary
-
-    private static func summaryTable(for records: [AttachmentRecord]) -> String {
-        let cellStyle = "padding:4px 8px; border:1px solid #ccc;"
-        let headerStyle = "background:#f0f0f0; \(cellStyle) text-align:left;"
-
-        var rows = ""
-        for record in records {
-            let statusText: String
-            let linksText: String
-            switch record.status {
-            case .saved(let fileURL, let publishedURL, let removed):
-                statusText = removed ? "✓ Saved & removed" : "✓ Saved — attachment left in email"
-                var links = "<a href='\(fileURL.absoluteString)'>Open on this Mac</a>"
-                if let publishedURL {
-                    links += " &nbsp;|&nbsp; <a href='\(publishedURL.absoluteString)'>Download (any device)</a>"
-                }
-                links += "<br><small>\(locationText(for: fileURL))</small>"
-                linksText = links
-            case .failed(let reason):
-                statusText = "⚠ Error — not removed (\(reason))"
-                linksText = ""
-            case .leftInPlace:
-                statusText = "— left in place"
-                linksText = ""
-            }
-            rows += "<tr><td style='\(cellStyle)'>\(record.name)</td>"
-                + "<td style='\(cellStyle)'>\(record.sizeText)</td>"
-                + "<td style='\(cellStyle)'>\(statusText)</td>"
-                + "<td style='\(cellStyle)'>\(linksText)</td></tr>"
-        }
-
-        return "<table style='border-collapse:collapse; font-family:sans-serif; font-size:12px; margin-bottom:12px;'>"
-            + "<tr><th style='\(headerStyle)'>Attachment</th><th style='\(headerStyle)'>Size</th>"
-            + "<th style='\(headerStyle)'>Status</th><th style='\(headerStyle)'>Links</th></tr>"
-            + rows + "</table>"
-    }
-
-    private static func locationText(for fileURL: URL) -> String {
-        let components = fileURL.pathComponents
-        if let index = components.firstIndex(of: "com~apple~CloudDocs") {
-            return (["iCloud Drive"] + components[(index + 1)...]).joined(separator: " ▸ ")
-        }
-        return fileURL.path
     }
 }

@@ -80,6 +80,9 @@ final class MailMonitor {
                 var text = "\(result.savedCount) attachment(s) unloaded from “\(result.subject)”"
                 if result.failedCount > 0 { text += " (\(result.failedCount) failed)" }
                 log(text)
+                for file in result.savedFiles {
+                    log("↳ \(file.lastPathComponent)")
+                }
                 for reason in result.failureReasons {
                     log("⚠ \(reason)")
                 }

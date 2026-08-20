@@ -129,15 +129,6 @@ enum MailBridge {
         }
     }
 
-    static func deleteAttachment(messageID: Int, attachmentID: String) throws {
-        try run("""
-        tell application "Mail"
-            set theMessage to first message of inbox whose id is \(messageID)
-            delete (first mail attachment of theMessage whose id is \(quoted(attachmentID)))
-        end tell
-        """)
-    }
-
     static func messageSource(messageID: Int) throws -> String {
         let result = try run("""
         tell application "Mail"
@@ -146,25 +137,6 @@ enum MailBridge {
         end tell
         """)
         return result.stringValue ?? ""
-    }
-
-    static func messageContent(messageID: Int) throws -> String {
-        let result = try run("""
-        tell application "Mail"
-            set theMessage to first message of inbox whose id is \(messageID)
-            return content of theMessage
-        end tell
-        """)
-        return result.stringValue ?? ""
-    }
-
-    static func setMessageContent(messageID: Int, content: String) throws {
-        try run("""
-        tell application "Mail"
-            set theMessage to first message of inbox whose id is \(messageID)
-            set content of theMessage to \(quoted(content))
-        end tell
-        """)
     }
 
     // MARK: - Helpers
