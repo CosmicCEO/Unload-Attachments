@@ -10,6 +10,10 @@ struct Unload_AttachmentsApp: App {
         MenuBarExtra("Unload Attachments", systemImage: "tray.and.arrow.down") {
             MenuContentView(monitor: monitor)
         }
+
+        Settings {
+            AccountSettingsView()
+        }
     }
 }
 
@@ -19,13 +23,14 @@ struct MenuContentView: View {
     @AppStorage(SettingsKeys.pollInterval) private var pollInterval = 30.0
     @AppStorage(SettingsKeys.folderScheme) private var folderScheme = FolderScheme.byYear.rawValue
     @AppStorage(SettingsKeys.flagProcessedMessages) private var flagProcessedMessages = true
+    @AppStorage(SettingsKeys.originalsPolicy) private var originalsPolicy = OriginalMessagePolicy.archive.rawValue
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     var body: some View {
         Toggle("Monitor for New Mail", isOn: $monitor.isMonitoring)
 
         Button("Process Inbox Now") {
-            Task { await monitor.pollOnce() }
+            Task { await monitor.processNow() }
         }
         .disabled(monitor.isProcessing)
 
@@ -56,8 +61,14 @@ struct MenuContentView: View {
 
         Toggle("Flag Processed Emails", isOn: $flagProcessedMessages)
 
+        Picker("Originals", selection: $originalsPolicy) {
+            ForEach(OriginalMessagePolicy.allCases) { policy in
+                Text(policy.label).tag(policy.rawValue)
+            }
+        }
+
         Button("Open Save Folder") {
-            try? AttachmentUnloader.ensureFoldersExist()
+            _ = try? AttachmentUnloader.ensureFoldersExist()
             NSWorkspace.shared.open(AttachmentUnloader.parentFolder)
         }
 
@@ -66,6 +77,10 @@ struct MenuContentView: View {
         }
 
         Divider()
+
+        SettingsLink {
+            Text("Mail Account…")
+        }
 
         Toggle("Launch at Login", isOn: $launchAtLogin)
             .onChange(of: launchAtLogin) { _, enabled in
@@ -97,7 +112,7 @@ struct MenuContentView: View {
         NSApp.activate(ignoringOtherApps: true)
         if panel.runModal() == .OK, let url = panel.url {
             UserDefaults.standard.set(url.path, forKey: SettingsKeys.parentFolderOverride)
-            try? AttachmentUnloader.ensureFoldersExist()
+            _ = try? AttachmentUnloader.ensureFoldersExist()
         }
     }
 }

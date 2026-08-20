@@ -22,13 +22,9 @@ final class MailMonitor {
     private(set) var activity: [ActivityEntry] = []
     private(set) var isProcessing = false
     private var pollTask: Task<Void, Never>?
+    private var lastLoggedError: String?
 
     init() {
-        // Only mail received after the first launch is ever processed.
-        if UserDefaults.standard.object(forKey: SettingsKeys.lastProcessedDate) == nil {
-            UserDefaults.standard.set(Date().timeIntervalSinceReferenceDate,
-                                      forKey: SettingsKeys.lastProcessedDate)
-        }
         isMonitoring = UserDefaults.standard.object(forKey: SettingsKeys.monitoringEnabled) as? Bool ?? true
 
         do {
@@ -47,7 +43,14 @@ final class MailMonitor {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.pollOnce()
-                try? await Task.sleep(for: .seconds(AppSettings.pollInterval))
+                guard !Task.isCancelled else { break }
+                // Prefer server push: IDLE suspends until new mail arrives
+                // (re-issued within the 29-minute protocol limit). When push
+                // isn't available, fall back to interval polling.
+                let pushed = await MailWorker.shared.waitForNewMail(window: 25 * 60)
+                if !pushed {
+                    try? await Task.sleep(for: .seconds(AppSettings.pollInterval))
+                }
             }
         }
     }
@@ -55,36 +58,33 @@ final class MailMonitor {
     private func stopPolling() {
         pollTask?.cancel()
         pollTask = nil
+        // Unblock a task suspended inside IDLE so it can observe cancellation.
+        Task { await MailWorker.shared.wakeIdle() }
+    }
+
+    /// Menu action: check immediately, whether the loop is idling or stopped.
+    func processNow() async {
+        if isMonitoring {
+            await MailWorker.shared.wakeIdle()
+            // If the loop was between polls rather than idling, run directly.
+            if !isProcessing { await pollOnce() }
+        } else {
+            await pollOnce()
+        }
     }
 
     func pollOnce() async {
         guard !isProcessing else { return }
-        let worker = MailWorker.shared
-        guard await worker.isMailRunning() else { return }
         isProcessing = true
         defer { isProcessing = false }
 
-        // Look back a little past the checkpoint so a message that arrived
-        // while a previous poll was running is not missed; the processed-ID
-        // list prevents double handling.
-        let since = lastProcessedDate.addingTimeInterval(-120)
-        let messages = await worker.newMessages(receivedAfter: since)
-
-        for message in messages {
-            guard !processedMessageIDs.contains(message.messageID) else { continue }
-
-            let hasOffice = message.attachments.contains {
-                AttachmentUnloader.officeExtensions.contains($0.fileExtension)
-            }
-            if hasOffice {
-                let result = await worker.unload(message)
+        do {
+            let results = try await MailWorker.shared.checkNewMail()
+            lastLoggedError = nil
+            for result in results {
                 var text = "\(result.savedCount) attachment(s) unloaded from “\(result.subject)”"
                 if result.failedCount > 0 { text += " (\(result.failedCount) failed)" }
                 log(text)
-                if result.savedCount > 0 && AppSettings.flagProcessedMessages {
-                    let flagged = await worker.flagMessage(messageID: message.id)
-                    if !flagged { log("⚠ Mail did not accept the flag on “\(result.subject)”") }
-                }
                 for file in result.savedFiles {
                     log("↳ \(file.lastPathComponent)")
                 }
@@ -93,24 +93,14 @@ final class MailMonitor {
                 }
                 notify(about: result)
             }
-
-            processedMessageIDs.append(message.messageID)
-            if message.dateReceived > lastProcessedDate {
-                lastProcessedDate = message.dateReceived
+        } catch {
+            // Log connection/configuration problems once, not every poll.
+            let text = error.localizedDescription
+            if text != lastLoggedError {
+                log("⚠ \(text)")
+                lastLoggedError = text
             }
         }
-    }
-
-    // MARK: - Checkpoint
-
-    private var lastProcessedDate: Date {
-        get { Date(timeIntervalSinceReferenceDate: UserDefaults.standard.double(forKey: SettingsKeys.lastProcessedDate)) }
-        set { UserDefaults.standard.set(newValue.timeIntervalSinceReferenceDate, forKey: SettingsKeys.lastProcessedDate) }
-    }
-
-    private var processedMessageIDs: [String] {
-        get { UserDefaults.standard.stringArray(forKey: SettingsKeys.processedMessageIDs) ?? [] }
-        set { UserDefaults.standard.set(Array(newValue.suffix(500)), forKey: SettingsKeys.processedMessageIDs) }
     }
 
     // MARK: - Feedback

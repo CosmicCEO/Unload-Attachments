@@ -1,150 +1,212 @@
 import Foundation
-import ScriptingBridge
+import OSLog
 
-// Minimal typed views of Mail's scripting interface. ScriptingBridge resolves
-// these members dynamically from Mail's scripting definition at runtime; the
-// protocols only exist to satisfy the compiler.
-@objc nonisolated protocol MailApplicationSB {
-    @objc optional var inbox: SBObject { get }
-}
-
-@objc nonisolated protocol MailMailboxSB {
-    @objc optional func messages() -> SBElementArray
-}
-
-@objc nonisolated protocol MailMessageSB {
-    @objc optional var id: Int { get }
-    @objc optional var messageId: String { get }
-    @objc optional var subject: String { get }
-    @objc optional var dateReceived: Date { get }
-    @objc optional var source: String { get }
-    @objc optional var flaggedStatus: Bool { get }
-    @objc optional func setFlaggedStatus(_ flagged: Bool)
-    @objc optional func setFlagIndex(_ index: Int)
-    @objc optional func mailAttachments() -> SBElementArray
-}
-
-@objc nonisolated protocol MailAttachmentSB {
-    @objc optional var id: String { get }
-    @objc optional var name: String { get }
-    @objc optional var fileSize: Int { get }
-}
-
-extension SBApplication: MailApplicationSB {}
-extension SBObject: MailMailboxSB, MailMessageSB, MailAttachmentSB {}
-
-nonisolated struct InboxAttachment: Sendable {
-    let id: String
-    let name: String
-    let fileSize: Int
-
-    var fileExtension: String {
-        (name as NSString).pathExtension.lowercased()
-    }
-}
-
-nonisolated struct InboxMessage: Sendable {
-    let id: Int
-    let messageID: String
-    let subject: String
-    let dateReceived: Date
-    let attachments: [InboxAttachment]
-}
-
-nonisolated enum MailBridgeError: LocalizedError {
-    case scriptError(String)
+nonisolated enum MailWorkerError: LocalizedError {
+    case notConfigured
 
     var errorDescription: String? {
         switch self {
-        case .scriptError(let message): return message
+        case .notConfigured:
+            return "No mail account configured — choose “Mail Account…” from the menu."
         }
     }
 }
 
-/// Owns all ScriptingBridge access to Mail on its own executor, so Apple-event
-/// round trips (which can take seconds on a large inbox) never block the main
-/// thread and the menu bar UI.
+/// Owns the IMAP session and the whole per-message pipeline on its own
+/// executor, so network round trips never block the main thread.
 actor MailWorker {
 
     static let shared = MailWorker()
 
-    func isMailRunning() -> Bool {
-        SBApplication(bundleIdentifier: "com.apple.mail")?.isRunning ?? false
+    private static let originalsMailbox = "Unloaded Originals"
+
+    private let client = IMAPClient()
+    private let logger = Logger(subsystem: "com.jerfiss.Unload-Attachments", category: "imap")
+    private var loggedIn = false
+    private var originalsMailboxEnsured = false
+
+    /// Scans the inbox for messages newer than the UID checkpoint and
+    /// processes each one. Returns one result per rewritten message.
+    func checkNewMail() async throws -> [ProcessResult] {
+        try await ensureConnected()
+
+        let inbox: MailboxStatus
+        do {
+            inbox = try await client.selectInbox()
+        } catch {
+            // Stale session — reconnect once, then let errors propagate.
+            loggedIn = false
+            try await ensureConnected()
+            inbox = try await client.selectInbox()
+        }
+
+        let defaults = UserDefaults.standard
+        let storedValidity = defaults.integer(forKey: SettingsKeys.imapUIDValidity)
+        var lastSeen = defaults.integer(forKey: SettingsKeys.imapLastSeenUID)
+
+        // First run (or the server reset its UID space): start from "now"
+        // so mail history is never processed.
+        if storedValidity != inbox.uidValidity || lastSeen == 0 {
+            defaults.set(inbox.uidValidity, forKey: SettingsKeys.imapUIDValidity)
+            defaults.set(max(inbox.uidNext - 1, 1), forKey: SettingsKeys.imapLastSeenUID)
+            return []
+        }
+
+        let uids = try await client.uidSearch("UID \(lastSeen + 1):*")
+            .filter { $0 > lastSeen }
+            .sorted()
+
+        var results: [ProcessResult] = []
+        for uid in uids {
+            do {
+                if let result = try await process(uid: uid) {
+                    results.append(result)
+                }
+            } catch {
+                logger.error("Failed to process message UID \(uid): \(error.localizedDescription, privacy: .public)")
+                results.append(ProcessResult(subject: "message \(uid)", savedCount: 0, failedCount: 1,
+                                             savedFiles: [], failureReasons: [error.localizedDescription]))
+            }
+            lastSeen = uid
+            defaults.set(lastSeen, forKey: SettingsKeys.imapLastSeenUID)
+        }
+        return results
     }
 
-    /// Snapshots inbox messages received after the given date.
-    func newMessages(receivedAfter date: Date) -> [InboxMessage] {
-        guard let messages = inboxMessagesArray() else { return [] }
+    // MARK: - Pipeline
 
-        let recent = messages.filtered(using: NSPredicate(format: "dateReceived > %@", date as NSDate))
+    /// Full pipeline for one message. Returns nil when the message needs no
+    /// processing (no Office/PDF attachments, or it's our own slimmed copy).
+    private func process(uid: Int) async throws -> ProcessResult? {
+        guard let fetched = try await client.uidFetchMessage(uid: uid) else { return nil }
+        let message = MIMEMessage(raw: fetched.raw)
 
-        var result: [InboxMessage] = []
-        for case let message as SBObject in recent {
-            let m = message as MailMessageSB
-            guard let id = m.id, let received = m.dateReceived else { continue }
+        // Never reprocess a message this app produced.
+        guard message.headerValue("X-Unloaded-By") == nil else { return nil }
 
-            var attachments: [InboxAttachment] = []
-            if let sbAttachments = m.mailAttachments?() {
-                for case let attachment as SBObject in sbAttachments {
-                    let a = attachment as MailAttachmentSB
-                    guard let attachmentID = a.id, let name = a.name else { continue }
-                    attachments.append(InboxAttachment(id: attachmentID, name: name, fileSize: a.fileSize ?? 0))
-                }
+        let attachments = message.attachmentParts
+        guard attachments.contains(where: { AttachmentUnloader.officeExtensions.contains($0.fileExtension) })
+        else { return nil }
+
+        let received = Self.parseInternalDate(fetched.internalDate) ?? Date()
+        let formatter = ByteCountFormatter()
+
+        var records: [AttachmentRecord] = []
+        var savedFiles: [URL] = []
+        var failureReasons: [String] = []
+        var removedPaths: Set<[Int]> = []
+        var savedCount = 0
+        var failedCount = 0
+
+        for attachment in attachments {
+            let data = attachment.decodedData
+            let sizeText = formatter.string(fromByteCount: Int64(data?.count ?? 0))
+
+            guard AttachmentUnloader.officeExtensions.contains(attachment.fileExtension) else {
+                records.append(AttachmentRecord(name: attachment.filename, sizeText: sizeText, status: .leftInPlace))
+                continue
             }
 
-            result.append(InboxMessage(
-                id: id,
-                messageID: m.messageId ?? String(id),
-                subject: m.subject ?? "(no subject)",
-                dateReceived: received,
-                attachments: attachments
-            ))
+            do {
+                guard let data else { throw UnloadError.extractionFailed(attachment.filename) }
+                let fileURL = try AttachmentUnloader.save(data: data, originalName: attachment.filename, receivedAt: received)
+                let published = await AttachmentUnloader.publishedURL(for: fileURL)
+                records.append(AttachmentRecord(name: attachment.filename, sizeText: sizeText,
+                                                status: .saved(fileURL, publishedURL: published)))
+                removedPaths.insert(attachment.path)
+                savedFiles.append(fileURL)
+                savedCount += 1
+            } catch {
+                let reason = "\(attachment.filename): \(error.localizedDescription)"
+                logger.error("Failed to unload \(reason, privacy: .public)")
+                records.append(AttachmentRecord(name: attachment.filename, sizeText: sizeText,
+                                                status: .failed(error.localizedDescription)))
+                failureReasons.append(reason)
+                failedCount += 1
+            }
         }
-        return result.sorted { $0.dateReceived < $1.dateReceived }
-    }
 
-    /// Saves the message's Office/PDF attachments and reports the outcome.
-    /// The message itself is never modified: modern Mail rejects all scripted
-    /// modifications of received messages, so attachments are extracted from
-    /// the raw message source instead.
-    func unload(_ message: InboxMessage) -> ProcessResult {
-        guard let source = messageSource(messageID: message.id), !source.isEmpty else {
-            let reason = "Could not read the raw source of “\(message.subject)” from Mail."
-            return ProcessResult(subject: message.subject, savedCount: 0, failedCount: 1,
-                                 savedFiles: [], failureReasons: [reason])
+        if savedCount > 0 {
+            let slimmed = message.rebuiltRemoving(
+                paths: removedPaths,
+                summaryHTML: AttachmentUnloader.summaryTable(for: records),
+                summaryPlain: AttachmentUnloader.plainSummary(for: records))
+
+            var flags = fetched.flags
+            if AppSettings.flagProcessedMessages && !flags.contains("\\Flagged") {
+                flags.append("\\Flagged")
+            }
+
+            switch AppSettings.originalMessagePolicy {
+            case .archive:
+                // Preserve the original before anything replaces it.
+                try await ensureOriginalsMailbox()
+                try await client.uidMove(uid: uid, to: Self.originalsMailbox)
+                try await client.append(mailbox: "INBOX", flags: flags,
+                                        internalDate: fetched.internalDate, message: slimmed)
+            case .delete:
+                // Only remove the original once the slimmed copy is safely stored.
+                try await client.append(mailbox: "INBOX", flags: flags,
+                                        internalDate: fetched.internalDate, message: slimmed)
+                try await client.uidDelete(uid: uid)
+            }
         }
-        return AttachmentUnloader.process(message, source: source)
+
+        return ProcessResult(subject: message.subject, savedCount: savedCount, failedCount: failedCount,
+                             savedFiles: savedFiles, failureReasons: failureReasons)
     }
 
-    /// Flags the message (green) to show its attachments were unloaded.
-    /// Flag status is message metadata, which Mail still allows scripts to
-    /// change — unlike message content. Returns false if Mail rejected it.
-    func flagMessage(messageID: Int) -> Bool {
-        guard let message = inboxMessage(withID: messageID) else { return false }
-        let m = message as MailMessageSB
-        m.setFlaggedStatus?(true)
-        m.setFlagIndex?(3) // green
-        // ScriptingBridge setters fail silently, so read back to verify.
-        return m.flaggedStatus ?? false
+    // MARK: - Push (IDLE)
+
+    /// Suspends inside IMAP IDLE until the inbox changes or the window
+    /// elapses. Returns false when push isn't available (not connected, or
+    /// the connection dropped) so the caller can fall back to interval polling.
+    func waitForNewMail(window: TimeInterval) async -> Bool {
+        guard loggedIn else { return false }
+        do {
+            try await client.idleWait(maxSeconds: window)
+            return true
+        } catch {
+            logger.notice("IDLE ended: \(error.localizedDescription, privacy: .public)")
+            loggedIn = false
+            await client.disconnect()
+            return false
+        }
     }
 
-    // MARK: - Private
-
-    private func inboxMessage(withID messageID: Int) -> SBObject? {
-        guard let messages = inboxMessagesArray() else { return nil }
-        let matches = messages.filtered(using: NSPredicate(format: "id == %d", messageID))
-        return matches.first as? SBObject
+    /// Ends the current IDLE wait early so a fresh check runs immediately.
+    func wakeIdle() async {
+        await client.interruptIdle()
     }
 
-    private func inboxMessagesArray() -> SBElementArray? {
-        guard let app = SBApplication(bundleIdentifier: "com.apple.mail"), app.isRunning,
-              let inbox = (app as MailApplicationSB).inbox
-        else { return nil }
-        return (inbox as MailMailboxSB).messages?()
+    // MARK: - Session
+
+    private func ensureConnected() async throws {
+        if loggedIn, (try? await client.noop()) != nil { return }
+        loggedIn = false
+        originalsMailboxEnsured = false
+
+        let username = AppSettings.imapUsername
+        guard !username.isEmpty, let password = KeychainStore.password(account: username) else {
+            throw MailWorkerError.notConfigured
+        }
+        try await client.connect(host: AppSettings.imapHost, username: username, password: password)
+        loggedIn = true
     }
 
-    private func messageSource(messageID: Int) -> String? {
-        guard let message = inboxMessage(withID: messageID) else { return nil }
-        return (message as MailMessageSB).source
+    private func ensureOriginalsMailbox() async throws {
+        guard !originalsMailboxEnsured else { return }
+        await client.ensureMailbox(Self.originalsMailbox)
+        originalsMailboxEnsured = true
+    }
+
+    // MARK: - Helpers
+
+    /// Parses an IMAP INTERNALDATE like `20-Aug-2026 09:48:12 -0500`.
+    private static func parseInternalDate(_ text: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "dd-MMM-yyyy HH:mm:ss Z"
+        return formatter.date(from: text.trimmingCharacters(in: .whitespaces))
     }
 }
