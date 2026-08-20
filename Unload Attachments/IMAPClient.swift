@@ -32,6 +32,13 @@ nonisolated struct MailboxStatus: Sendable {
     let messageCount: Int
 }
 
+nonisolated struct FetchedMessage: Sendable {
+    let uid: Int
+    let flags: [String]
+    let internalDate: String
+    let raw: Data
+}
+
 /// Resumes a continuation exactly once even if NWConnection fires its state
 /// handler multiple times.
 private final class Resumer<T>: @unchecked Sendable {
@@ -128,6 +135,89 @@ actor IMAPClient {
             if let value = firstInt(in: response.text, pattern: #"^\* (\d+) EXISTS"#) { messageCount = value }
         }
         return MailboxStatus(uidValidity: uidValidity, uidNext: uidNext, messageCount: messageCount)
+    }
+
+    /// Creates a mailbox; quietly succeeds when it already exists.
+    func ensureMailbox(_ name: String) async {
+        _ = try? await command("CREATE \(quoted(name))")
+    }
+
+    // MARK: - Messages
+
+    func uidSearch(_ criteria: String) async throws -> [Int] {
+        let responses = try await command("UID SEARCH \(criteria)")
+        for response in responses where response.text.hasPrefix("* SEARCH") {
+            return response.text.dropFirst("* SEARCH".count)
+                .split(separator: " ")
+                .compactMap { Int($0) }
+        }
+        return []
+    }
+
+    /// Fetches a complete message (flags, internal date, raw RFC 822 bytes).
+    func uidFetchMessage(uid: Int) async throws -> FetchedMessage? {
+        let responses = try await command("UID FETCH \(uid) (FLAGS INTERNALDATE BODY.PEEK[])")
+        for response in responses where response.text.contains("FETCH") && !response.literals.isEmpty {
+            let flagsText = firstCapture(in: response.text, pattern: #"FLAGS \(([^)]*)\)"#) ?? ""
+            let internalDate = firstCapture(in: response.text, pattern: #"INTERNALDATE "([^"]+)""#) ?? ""
+            let flags = flagsText.split(separator: " ").map(String.init).filter { $0 != "\\Recent" }
+            guard let raw = response.literals.last else { continue }
+            return FetchedMessage(uid: uid, flags: flags, internalDate: internalDate, raw: raw)
+        }
+        return nil
+    }
+
+    /// Uploads a message. Uses the IMAP literal continuation handshake.
+    func append(mailbox: String, flags: [String], internalDate: String?, message: Data) async throws {
+        tagCounter += 1
+        let tag = String(format: "A%04d", tagCounter)
+        var header = "\(tag) APPEND \(quoted(mailbox))"
+        if !flags.isEmpty { header += " (\(flags.joined(separator: " ")))" }
+        if let internalDate, !internalDate.isEmpty { header += " \"\(internalDate)\"" }
+        header += " {\(message.count)}\r\n"
+        try await sendRaw(Data(header.utf8))
+
+        // Wait for the "+" continuation before sending the literal.
+        while true {
+            let line = try await readLine()
+            if line.hasPrefix("+") { break }
+            if line.hasPrefix("\(tag) ") {
+                throw IMAPError.server(String(line.dropFirst(tag.count + 1)))
+            }
+            // Untagged noise before the continuation is allowed; ignore it.
+        }
+        try await sendRaw(message)
+        try await sendRaw(Data("\r\n".utf8))
+
+        while true {
+            let response = try await readResponse()
+            if response.text.hasPrefix("\(tag) ") {
+                let status = String(response.text.dropFirst(tag.count + 1))
+                if status.hasPrefix("OK") { return }
+                throw IMAPError.server(status)
+            }
+        }
+    }
+
+    /// Moves a message to another mailbox, falling back to COPY + delete for
+    /// servers without MOVE.
+    func uidMove(uid: Int, to mailbox: String) async throws {
+        do {
+            try await command("UID MOVE \(uid) \(quoted(mailbox))")
+        } catch IMAPError.server {
+            try await command("UID COPY \(uid) \(quoted(mailbox))")
+            try await uidDelete(uid: uid)
+        }
+    }
+
+    /// Permanently removes a message from the selected mailbox.
+    func uidDelete(uid: Int) async throws {
+        try await command(#"UID STORE \#(uid) +FLAGS.SILENT (\Deleted)"#)
+        do {
+            try await command("UID EXPUNGE \(uid)")
+        } catch IMAPError.server {
+            try await command("EXPUNGE")
+        }
     }
 
     // MARK: - Command plumbing
@@ -244,12 +334,16 @@ actor IMAPClient {
         + "\""
     }
 
-    private func firstInt(in text: String, pattern: String) -> Int? {
+    private func firstCapture(in text: String, pattern: String) -> String? {
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
               match.numberOfRanges > 1,
               let range = Range(match.range(at: 1), in: text)
         else { return nil }
-        return Int(text[range])
+        return String(text[range])
+    }
+
+    private func firstInt(in text: String, pattern: String) -> Int? {
+        firstCapture(in: text, pattern: pattern).flatMap(Int.init)
     }
 }
