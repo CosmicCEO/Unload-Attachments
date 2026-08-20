@@ -138,6 +138,16 @@ enum MailBridge {
         """)
     }
 
+    static func messageSource(messageID: Int) throws -> String {
+        let result = try run("""
+        tell application "Mail"
+            set theMessage to first message of inbox whose id is \(messageID)
+            return source of theMessage
+        end tell
+        """)
+        return result.stringValue ?? ""
+    }
+
     static func messageContent(messageID: Int) throws -> String {
         let result = try run("""
         tell application "Mail"

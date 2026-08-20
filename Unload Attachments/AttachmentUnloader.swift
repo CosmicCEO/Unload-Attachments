@@ -3,7 +3,7 @@ import OSLog
 
 struct AttachmentRecord {
     enum Status {
-        case saved(URL, publishedURL: URL?)
+        case saved(URL, publishedURL: URL?, removed: Bool)
         case failed(String)
         case leftInPlace
     }
@@ -89,6 +89,7 @@ enum AttachmentUnloader {
         var savedCount = 0
         var failedCount = 0
         var failureReasons: [String] = []
+        var messageSourceCache: String?
 
         for attachment in message.attachments {
             let sizeText = formatter.string(fromByteCount: Int64(attachment.fileSize))
@@ -108,7 +109,21 @@ enum AttachmentUnloader {
                 defer { try? FileManager.default.removeItem(at: staging) }
 
                 let stagedFile = staging.appendingPathComponent(attachment.name)
-                try MailBridge.saveAttachment(messageID: message.id, attachmentID: attachment.id, toFile: stagedFile)
+                do {
+                    try MailBridge.saveAttachment(messageID: message.id, attachmentID: attachment.id, toFile: stagedFile)
+                } catch {
+                    // Mail's scripted save is broken on modern macOS (-10000);
+                    // extract the attachment from the raw message source instead.
+                    logger.notice("Scripted save failed for \(attachment.name, privacy: .public); extracting from raw source")
+                    if messageSourceCache == nil {
+                        messageSourceCache = try MailBridge.messageSource(messageID: message.id)
+                    }
+                    guard let source = messageSourceCache,
+                          let data = MIMEExtractor.attachmentData(named: attachment.name, inSource: source) else {
+                        throw MailBridgeError.scriptError("Could not extract \(attachment.name) from the raw message.")
+                    }
+                    try data.write(to: stagedFile)
+                }
                 guard FileManager.default.fileExists(atPath: stagedFile.path) else {
                     throw MailBridgeError.scriptError("Mail did not write \(attachment.name).")
                 }
@@ -117,11 +132,21 @@ enum AttachmentUnloader {
                 let finalURL = uniqueURL(in: destination, fileName: finalName)
                 try FileManager.default.moveItem(at: stagedFile, to: finalURL)
 
-                try MailBridge.deleteAttachment(messageID: message.id, attachmentID: attachment.id)
+                // The file is safe now — a removal failure downgrades the row
+                // instead of losing the save.
+                var removed = true
+                do {
+                    try MailBridge.deleteAttachment(messageID: message.id, attachmentID: attachment.id)
+                } catch {
+                    removed = false
+                    let reason = "\(attachment.name) was saved, but could not be removed from the email: \(error.localizedDescription)"
+                    logger.error("\(reason, privacy: .public)")
+                    failureReasons.append(reason)
+                }
 
                 let published = await publishedURL(for: finalURL)
                 records.append(AttachmentRecord(name: attachment.name, sizeText: sizeText,
-                                                status: .saved(finalURL, publishedURL: published)))
+                                                status: .saved(finalURL, publishedURL: published, removed: removed)))
                 savedCount += 1
             } catch {
                 let reason = "\(attachment.name): \(error.localizedDescription)"
@@ -136,7 +161,13 @@ enum AttachmentUnloader {
         if savedCount > 0 {
             let original = (try? MailBridge.messageContent(messageID: message.id)) ?? ""
             let table = summaryTable(for: records)
-            try? MailBridge.setMessageContent(messageID: message.id, content: table + "<br>" + original)
+            do {
+                try MailBridge.setMessageContent(messageID: message.id, content: table + "<br>" + original)
+            } catch {
+                let reason = "Could not add the summary table to the email: \(error.localizedDescription)"
+                logger.error("\(reason, privacy: .public)")
+                failureReasons.append(reason)
+            }
         }
 
         return ProcessResult(subject: message.subject, savedCount: savedCount,
@@ -201,8 +232,8 @@ enum AttachmentUnloader {
             let statusText: String
             let linksText: String
             switch record.status {
-            case .saved(let fileURL, let publishedURL):
-                statusText = "✓ Saved & removed"
+            case .saved(let fileURL, let publishedURL, let removed):
+                statusText = removed ? "✓ Saved & removed" : "✓ Saved — attachment left in email"
                 var links = "<a href='\(fileURL.absoluteString)'>Open on this Mac</a>"
                 if let publishedURL {
                     links += " &nbsp;|&nbsp; <a href='\(publishedURL.absoluteString)'>Download (any device)</a>"
