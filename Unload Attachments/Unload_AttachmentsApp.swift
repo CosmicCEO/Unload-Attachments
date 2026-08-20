@@ -10,6 +10,10 @@ struct Unload_AttachmentsApp: App {
         MenuBarExtra("Unload Attachments", systemImage: "tray.and.arrow.down") {
             MenuContentView(monitor: monitor)
         }
+
+        Settings {
+            AccountSettingsView()
+        }
     }
 }
 
@@ -66,6 +70,10 @@ struct MenuContentView: View {
         }
 
         Divider()
+
+        SettingsLink {
+            Text("Mail Account…")
+        }
 
         Toggle("Launch at Login", isOn: $launchAtLogin)
             .onChange(of: launchAtLogin) { _, enabled in

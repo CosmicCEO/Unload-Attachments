@@ -23,6 +23,8 @@ nonisolated enum SettingsKeys {
     static let flagProcessedMessages = "flagProcessedMessages"
     static let lastProcessedDate = "lastProcessedDate"
     static let processedMessageIDs = "processedMessageIDs"
+    static let imapUsername = "imapUsername"
+    static let imapHost = "imapHost"
 }
 
 // UserDefaults is thread-safe, so these reads are safe from any executor.
@@ -44,5 +46,14 @@ nonisolated enum AppSettings {
 
     static var flagProcessedMessages: Bool {
         UserDefaults.standard.object(forKey: SettingsKeys.flagProcessedMessages) as? Bool ?? true
+    }
+
+    static var imapUsername: String {
+        UserDefaults.standard.string(forKey: SettingsKeys.imapUsername) ?? ""
+    }
+
+    static var imapHost: String {
+        let value = UserDefaults.standard.string(forKey: SettingsKeys.imapHost) ?? ""
+        return value.isEmpty ? "imap.mail.me.com" : value
     }
 }
