@@ -81,6 +81,10 @@ final class MailMonitor {
                 var text = "\(result.savedCount) attachment(s) unloaded from “\(result.subject)”"
                 if result.failedCount > 0 { text += " (\(result.failedCount) failed)" }
                 log(text)
+                if result.savedCount > 0 && AppSettings.flagProcessedMessages {
+                    let flagged = await worker.flagMessage(messageID: message.id)
+                    if !flagged { log("⚠ Mail did not accept the flag on “\(result.subject)”") }
+                }
                 for file in result.savedFiles {
                     log("↳ \(file.lastPathComponent)")
                 }

@@ -18,6 +18,7 @@ struct MenuContentView: View {
 
     @AppStorage(SettingsKeys.pollInterval) private var pollInterval = 30.0
     @AppStorage(SettingsKeys.folderScheme) private var folderScheme = FolderScheme.byYear.rawValue
+    @AppStorage(SettingsKeys.flagProcessedMessages) private var flagProcessedMessages = true
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     var body: some View {
@@ -52,6 +53,8 @@ struct MenuContentView: View {
                 Text(scheme.label).tag(scheme.rawValue)
             }
         }
+
+        Toggle("Flag Processed Emails", isOn: $flagProcessedMessages)
 
         Button("Open Save Folder") {
             try? AttachmentUnloader.ensureFoldersExist()

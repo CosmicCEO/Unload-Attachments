@@ -18,6 +18,9 @@ import ScriptingBridge
     @objc optional var subject: String { get }
     @objc optional var dateReceived: Date { get }
     @objc optional var source: String { get }
+    @objc optional var flaggedStatus: Bool { get }
+    @objc optional func setFlaggedStatus(_ flagged: Bool)
+    @objc optional func setFlagIndex(_ index: Int)
     @objc optional func mailAttachments() -> SBElementArray
 }
 
@@ -113,7 +116,25 @@ actor MailWorker {
         return AttachmentUnloader.process(message, source: source)
     }
 
+    /// Flags the message (green) to show its attachments were unloaded.
+    /// Flag status is message metadata, which Mail still allows scripts to
+    /// change — unlike message content. Returns false if Mail rejected it.
+    func flagMessage(messageID: Int) -> Bool {
+        guard let message = inboxMessage(withID: messageID) else { return false }
+        let m = message as MailMessageSB
+        m.setFlaggedStatus?(true)
+        m.setFlagIndex?(3) // green
+        // ScriptingBridge setters fail silently, so read back to verify.
+        return m.flaggedStatus ?? false
+    }
+
     // MARK: - Private
+
+    private func inboxMessage(withID messageID: Int) -> SBObject? {
+        guard let messages = inboxMessagesArray() else { return nil }
+        let matches = messages.filtered(using: NSPredicate(format: "id == %d", messageID))
+        return matches.first as? SBObject
+    }
 
     private func inboxMessagesArray() -> SBElementArray? {
         guard let app = SBApplication(bundleIdentifier: "com.apple.mail"), app.isRunning,
@@ -123,9 +144,7 @@ actor MailWorker {
     }
 
     private func messageSource(messageID: Int) -> String? {
-        guard let messages = inboxMessagesArray() else { return nil }
-        let matches = messages.filtered(using: NSPredicate(format: "id == %d", messageID))
-        guard let message = matches.first as? SBObject else { return nil }
+        guard let message = inboxMessage(withID: messageID) else { return nil }
         return (message as MailMessageSB).source
     }
 }

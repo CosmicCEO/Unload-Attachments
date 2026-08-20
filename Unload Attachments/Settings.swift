@@ -20,6 +20,7 @@ nonisolated enum SettingsKeys {
     static let pollInterval = "pollInterval"
     static let folderScheme = "folderScheme"
     static let parentFolderOverride = "parentFolderOverride"
+    static let flagProcessedMessages = "flagProcessedMessages"
     static let lastProcessedDate = "lastProcessedDate"
     static let processedMessageIDs = "processedMessageIDs"
 }
@@ -39,5 +40,9 @@ nonisolated enum AppSettings {
         guard let path = UserDefaults.standard.string(forKey: SettingsKeys.parentFolderOverride),
               !path.isEmpty else { return nil }
         return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    static var flagProcessedMessages: Bool {
+        UserDefaults.standard.object(forKey: SettingsKeys.flagProcessedMessages) as? Bool ?? true
     }
 }
