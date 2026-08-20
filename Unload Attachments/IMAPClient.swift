@@ -41,7 +41,7 @@ nonisolated struct FetchedMessage: Sendable {
 
 /// Resumes a continuation exactly once even if NWConnection fires its state
 /// handler multiple times.
-private final class Resumer<T>: @unchecked Sendable {
+private nonisolated final class Resumer<T>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<T, Error>?
 
@@ -116,6 +116,63 @@ actor IMAPClient {
 
     func noop() async throws {
         try await command("NOOP")
+    }
+
+    // MARK: - IDLE (server push)
+
+    private var idleActive = false
+    private var idleDoneSent = false
+
+    /// Ends an in-progress IDLE early (new-mail wakeup, manual poll, or
+    /// monitoring being switched off). Safe to call at any time.
+    func interruptIdle() async {
+        guard idleActive, !idleDoneSent else { return }
+        idleDoneSent = true
+        try? await sendRaw(Data("DONE\r\n".utf8))
+    }
+
+    /// Enters IMAP IDLE (RFC 2177) on the selected mailbox and suspends until
+    /// the server reports activity or the window elapses (must stay under the
+    /// 29-minute re-issue limit). Returns true when the mailbox changed.
+    @discardableResult
+    func idleWait(maxSeconds: TimeInterval) async throws -> Bool {
+        guard connection != nil else { throw IMAPError.notConnected }
+        tagCounter += 1
+        let tag = String(format: "A%04d", tagCounter)
+        idleActive = true
+        idleDoneSent = false
+        defer { idleActive = false }
+
+        try await send("\(tag) IDLE\r\n")
+        while true {
+            let line = try await readLine()
+            if line.hasPrefix("+") { break }
+            if line.hasPrefix("\(tag) ") {
+                // NO/BAD: server doesn't support IDLE.
+                throw IMAPError.server(String(line.dropFirst(tag.count + 1)))
+            }
+        }
+
+        let timeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(maxSeconds))
+            await self?.interruptIdle()
+        }
+        defer { timeoutTask.cancel() }
+
+        var changed = false
+        while true {
+            let line = try await readLine()
+            if line.hasPrefix("\(tag) ") {
+                let status = String(line.dropFirst(tag.count + 1))
+                if status.hasPrefix("OK") { return changed }
+                throw IMAPError.server(status)
+            }
+            if line.hasPrefix("* ") {
+                // EXISTS/EXPUNGE/FLAGS — something happened; wrap up.
+                changed = true
+                await interruptIdle()
+            }
+        }
     }
 
     // MARK: - Mailboxes

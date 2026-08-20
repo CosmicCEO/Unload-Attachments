@@ -43,7 +43,14 @@ final class MailMonitor {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.pollOnce()
-                try? await Task.sleep(for: .seconds(AppSettings.pollInterval))
+                guard !Task.isCancelled else { break }
+                // Prefer server push: IDLE suspends until new mail arrives
+                // (re-issued within the 29-minute protocol limit). When push
+                // isn't available, fall back to interval polling.
+                let pushed = await MailWorker.shared.waitForNewMail(window: 25 * 60)
+                if !pushed {
+                    try? await Task.sleep(for: .seconds(AppSettings.pollInterval))
+                }
             }
         }
     }
@@ -51,6 +58,19 @@ final class MailMonitor {
     private func stopPolling() {
         pollTask?.cancel()
         pollTask = nil
+        // Unblock a task suspended inside IDLE so it can observe cancellation.
+        Task { await MailWorker.shared.wakeIdle() }
+    }
+
+    /// Menu action: check immediately, whether the loop is idling or stopped.
+    func processNow() async {
+        if isMonitoring {
+            await MailWorker.shared.wakeIdle()
+            // If the loop was between polls rather than idling, run directly.
+            if !isProcessing { await pollOnce() }
+        } else {
+            await pollOnce()
+        }
     }
 
     func pollOnce() async {

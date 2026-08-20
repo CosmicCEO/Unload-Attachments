@@ -30,7 +30,7 @@ struct MenuContentView: View {
         Toggle("Monitor for New Mail", isOn: $monitor.isMonitoring)
 
         Button("Process Inbox Now") {
-            Task { await monitor.pollOnce() }
+            Task { await monitor.processNow() }
         }
         .disabled(monitor.isProcessing)
 
@@ -68,7 +68,7 @@ struct MenuContentView: View {
         }
 
         Button("Open Save Folder") {
-            try? AttachmentUnloader.ensureFoldersExist()
+            _ = try? AttachmentUnloader.ensureFoldersExist()
             NSWorkspace.shared.open(AttachmentUnloader.parentFolder)
         }
 
@@ -112,7 +112,7 @@ struct MenuContentView: View {
         NSApp.activate(ignoringOtherApps: true)
         if panel.runModal() == .OK, let url = panel.url {
             UserDefaults.standard.set(url.path, forKey: SettingsKeys.parentFolderOverride)
-            try? AttachmentUnloader.ensureFoldersExist()
+            _ = try? AttachmentUnloader.ensureFoldersExist()
         }
     }
 }

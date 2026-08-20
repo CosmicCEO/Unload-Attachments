@@ -156,6 +156,29 @@ actor MailWorker {
                              savedFiles: savedFiles, failureReasons: failureReasons)
     }
 
+    // MARK: - Push (IDLE)
+
+    /// Suspends inside IMAP IDLE until the inbox changes or the window
+    /// elapses. Returns false when push isn't available (not connected, or
+    /// the connection dropped) so the caller can fall back to interval polling.
+    func waitForNewMail(window: TimeInterval) async -> Bool {
+        guard loggedIn else { return false }
+        do {
+            try await client.idleWait(maxSeconds: window)
+            return true
+        } catch {
+            logger.notice("IDLE ended: \(error.localizedDescription, privacy: .public)")
+            loggedIn = false
+            await client.disconnect()
+            return false
+        }
+    }
+
+    /// Ends the current IDLE wait early so a fresh check runs immediately.
+    func wakeIdle() async {
+        await client.interruptIdle()
+    }
+
     // MARK: - Session
 
     private func ensureConnected() async throws {

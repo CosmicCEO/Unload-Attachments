@@ -113,15 +113,17 @@ nonisolated enum AttachmentUnloader {
     static func publishedURL(for fileURL: URL, timeout: TimeInterval = 45) async -> URL? {
         let fileManager = FileManager.default
         guard fileManager.isUbiquitousItem(at: fileURL) else { return nil }
+
+        // Wait for the upload by quietly probing the resource key — calling
+        // the publish API before the upload finishes logs system errors on
+        // every attempt.
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            do {
-                return try fileManager.url(forPublishingUbiquitousItemAt: fileURL, expiration: nil)
-            } catch {
-                try? await Task.sleep(for: .seconds(3))
-            }
+            let values = try? fileURL.resourceValues(forKeys: [.ubiquitousItemIsUploadedKey])
+            if values?.ubiquitousItemIsUploaded == true { break }
+            try? await Task.sleep(for: .seconds(2))
         }
-        return nil
+        return try? fileManager.url(forPublishingUbiquitousItemAt: fileURL, expiration: nil)
     }
 
     // MARK: - Summary rendering
