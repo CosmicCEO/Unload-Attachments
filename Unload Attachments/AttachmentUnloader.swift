@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 struct AttachmentRecord {
     enum Status {
@@ -16,10 +17,13 @@ struct ProcessResult {
     let subject: String
     let savedCount: Int
     let failedCount: Int
+    let failureReasons: [String]
 }
 
 @MainActor
 enum AttachmentUnloader {
+
+    private static let logger = Logger(subsystem: "com.jerfiss.Unload-Attachments", category: "unloader")
 
     /// File types that are saved out of the message and removed from it.
     static let officeExtensions: Set<String> = ["xls", "xlsx", "doc", "docx", "ppt", "pptx", "pdf"]
@@ -84,6 +88,7 @@ enum AttachmentUnloader {
         var records: [AttachmentRecord] = []
         var savedCount = 0
         var failedCount = 0
+        var failureReasons: [String] = []
 
         for attachment in message.attachments {
             let sizeText = formatter.string(fromByteCount: Int64(attachment.fileSize))
@@ -102,8 +107,8 @@ enum AttachmentUnloader {
                 try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
                 defer { try? FileManager.default.removeItem(at: staging) }
 
-                try MailBridge.saveAttachment(messageID: message.id, attachmentID: attachment.id, toFolder: staging)
                 let stagedFile = staging.appendingPathComponent(attachment.name)
+                try MailBridge.saveAttachment(messageID: message.id, attachmentID: attachment.id, toFile: stagedFile)
                 guard FileManager.default.fileExists(atPath: stagedFile.path) else {
                     throw MailBridgeError.scriptError("Mail did not write \(attachment.name).")
                 }
@@ -119,6 +124,9 @@ enum AttachmentUnloader {
                                                 status: .saved(finalURL, publishedURL: published)))
                 savedCount += 1
             } catch {
+                let reason = "\(attachment.name): \(error.localizedDescription)"
+                logger.error("Failed to unload \(reason, privacy: .public)")
+                failureReasons.append(reason)
                 records.append(AttachmentRecord(name: attachment.name, sizeText: sizeText,
                                                 status: .failed(error.localizedDescription)))
                 failedCount += 1
@@ -131,7 +139,8 @@ enum AttachmentUnloader {
             try? MailBridge.setMessageContent(messageID: message.id, content: table + "<br>" + original)
         }
 
-        return ProcessResult(subject: message.subject, savedCount: savedCount, failedCount: failedCount)
+        return ProcessResult(subject: message.subject, savedCount: savedCount,
+                             failedCount: failedCount, failureReasons: failureReasons)
     }
 
     // MARK: - iCloud link publishing

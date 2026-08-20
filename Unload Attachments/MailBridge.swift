@@ -104,14 +104,29 @@ enum MailBridge {
     // ScriptingBridge is unreliable for Mail's save/delete/set-content
     // commands, so these go through small NSAppleScript snippets instead.
 
-    static func saveAttachment(messageID: Int, attachmentID: String, toFolder folder: URL) throws {
-        try run("""
-        tell application "Mail"
+    static func saveAttachment(messageID: Int, attachmentID: String, toFile file: URL) throws {
+        let lookup = """
             set theMessage to first message of inbox whose id is \(messageID)
             set theAttachment to first mail attachment of theMessage whose id is \(quoted(attachmentID))
-            save theAttachment in ((POSIX file \(quoted(folder.path + "/"))) as alias)
-        end tell
-        """)
+        """
+        do {
+            // Modern Mail expects the full destination file path.
+            try run("""
+            tell application "Mail"
+            \(lookup)
+                save theAttachment in (POSIX file \(quoted(file.path)))
+            end tell
+            """)
+        } catch {
+            // Older Mail versions instead save into a folder, keeping the
+            // attachment's original name.
+            try run("""
+            tell application "Mail"
+            \(lookup)
+                save theAttachment in ((POSIX file \(quoted(file.deletingLastPathComponent().path + "/"))) as alias)
+            end tell
+            """)
+        }
     }
 
     static func deleteAttachment(messageID: Int, attachmentID: String) throws {
