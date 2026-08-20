@@ -7,13 +7,54 @@ struct Unload_AttachmentsApp: App {
     @State private var monitor = MailMonitor()
 
     var body: some Scene {
-        MenuBarExtra("Unload Attachments", systemImage: "tray.and.arrow.down") {
+        MenuBarExtra {
             MenuContentView(monitor: monitor)
+        } label: {
+            MenuBarIcon(badged: monitor.unseenCount > 0)
         }
 
         Settings {
             AccountSettingsView()
         }
+    }
+}
+
+/// Menu bar icon with an optional green "new activity" dot. The badged
+/// variant must be a non-template image: the menu bar renders template
+/// images monochrome, which would turn the dot gray.
+struct MenuBarIcon: View {
+    let badged: Bool
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Image(nsImage: badged ? Self.badgedImage(dark: colorScheme == .dark) : Self.plainImage)
+    }
+
+    private static let plainImage: NSImage = {
+        let image = NSImage(systemSymbolName: "tray.and.arrow.down",
+                            accessibilityDescription: "Unload Attachments")!
+            .withSymbolConfiguration(.init(pointSize: 15, weight: .regular)) ?? NSImage()
+        image.isTemplate = true
+        return image
+    }()
+
+    private static func badgedImage(dark: Bool) -> NSImage {
+        let size = NSSize(width: 20, height: 17)
+        let glyphColor: NSColor = dark ? .white : .black
+        let image = NSImage(size: size, flipped: false) { rect in
+            if let symbol = NSImage(systemSymbolName: "tray.and.arrow.down",
+                                    accessibilityDescription: "Unload Attachments — new files")?
+                .withSymbolConfiguration(
+                    NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+                        .applying(.init(paletteColors: [glyphColor]))) {
+                symbol.draw(in: NSRect(x: 0, y: 0, width: 17, height: 15))
+            }
+            NSColor.systemGreen.setFill()
+            NSBezierPath(ovalIn: NSRect(x: rect.maxX - 7.5, y: rect.maxY - 7.5, width: 7, height: 7)).fill()
+            return true
+        }
+        image.isTemplate = false
+        return image
     }
 }
 
@@ -28,6 +69,9 @@ struct MenuContentView: View {
 
     var body: some View {
         Toggle("Monitor for New Mail", isOn: $monitor.isMonitoring)
+            // Menu-style content is instantiated on each open, so this fires
+            // exactly when the user opens the menu — clearing the green dot.
+            .onAppear { monitor.markSeen() }
 
         Button("Process Inbox Now") {
             Task { await monitor.processNow() }

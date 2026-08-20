@@ -21,6 +21,9 @@ final class MailMonitor {
 
     private(set) var activity: [ActivityEntry] = []
     private(set) var isProcessing = false
+    /// Attachments saved since the user last opened the menu (drives the
+    /// green dot on the menu bar icon).
+    private(set) var unseenCount = 0
     private var pollTask: Task<Void, Never>?
     private var lastLoggedError: String?
 
@@ -62,6 +65,11 @@ final class MailMonitor {
         Task { await MailWorker.shared.wakeIdle() }
     }
 
+    /// The user opened the menu — the green dot has served its purpose.
+    func markSeen() {
+        unseenCount = 0
+    }
+
     /// Menu action: check immediately, whether the loop is idling or stopped.
     func processNow() async {
         if isMonitoring {
@@ -91,6 +99,7 @@ final class MailMonitor {
                 for reason in result.failureReasons {
                     log("⚠ \(reason)")
                 }
+                if result.savedCount > 0 { unseenCount += result.savedCount }
                 notify(about: result)
             }
         } catch {
