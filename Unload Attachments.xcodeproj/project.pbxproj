@@ -8,13 +8,30 @@
 
 /* Begin PBXFileReference section */
 		6224484A3037454E006DD8E3 /* Unload Attachments.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Unload Attachments.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		62E0517830373A0B00FF6C1E /* Unload.applescript */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.applescript; path = Unload.applescript; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		62DC0EBB30377181004A2875 /* Exceptions for "docs" folder in "Unload Attachments" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Unload.applescript,
+			);
+			target = 622448493037454E006DD8E3 /* Unload Attachments */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		6224484C3037454E006DD8E3 /* Unload Attachments */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = "Unload Attachments";
+			sourceTree = "<group>";
+		};
+		62DC0EBA30377175004A2875 /* docs */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				62DC0EBB30377181004A2875 /* Exceptions for "docs" folder in "Unload Attachments" target */,
+			);
+			path = docs;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -39,9 +56,9 @@
 		62E051713037395D00FF6C1E = {
 			isa = PBXGroup;
 			children = (
-				62E0517830373A0B00FF6C1E /* Unload.applescript */,
 				6224484C3037454E006DD8E3 /* Unload Attachments */,
 				6224484B3037454E006DD8E3 /* Products */,
+				62DC0EBA30377175004A2875 /* docs */,
 			);
 			sourceTree = "<group>";
 		};
@@ -60,6 +77,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				6224484C3037454E006DD8E3 /* Unload Attachments */,
+				62DC0EBA30377175004A2875 /* docs */,
 			);
 			name = "Unload Attachments";
 			productName = "Unload Attachments";

@@ -2,7 +2,7 @@
         Change Content of a Message and Save — macOS Mail Edition
         Version 1.0
 
-        Rewritten from the original Outlook 2016 script by Jerod Price.
+        Rewritten from the original Outlook 2016 VBA script by CosmicCEO.
 
         When one or more emails are selected in Mail.app and this script is run:
           • Each email is checked for attachments
