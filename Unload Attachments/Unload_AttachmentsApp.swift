@@ -66,14 +66,6 @@ struct MenuContentView: View {
     @AppStorage(SettingsKeys.originalsPolicy) private var originalsPolicy = OriginalMessagePolicy.archive.rawValue
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
-    init(monitor: MailMonitor) {
-        _monitor = Bindable(wrappedValue: monitor)
-        // Menu-style content is rebuilt each time the menu opens; clearing the
-        // unseen badge here fires reliably on open (unlike .onAppear on a
-        // menu item). Scheduled async so it doesn't mutate state mid-build.
-        Task { @MainActor in monitor.markSeen() }
-    }
-
     var body: some View {
         Toggle("Monitor for New Mail", isOn: $monitor.isMonitoring)
 

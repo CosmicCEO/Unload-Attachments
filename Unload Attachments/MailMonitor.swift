@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 import UserNotifications
@@ -25,7 +26,12 @@ final class MailMonitor {
     /// green dot on the menu bar icon).
     private(set) var unseenCount = 0
     private var pollTask: Task<Void, Never>?
+    private var retryTask: Task<Void, Never>?
+    private var menuObserver: NSObjectProtocol?
     private var lastLoggedError: String?
+
+    /// One IDLE window. RFC 2177 requires re-issuing inside 29 minutes.
+    private static let idleWindow: TimeInterval = 25 * 60
 
     init() {
         isMonitoring = UserDefaults.standard.object(forKey: SettingsKeys.monitoringEnabled) as? Bool ?? true
@@ -36,7 +42,22 @@ final class MailMonitor {
             log("Could not create save folder: \(error.localizedDescription)")
         }
 
+        observeMenuOpening()
         if isMonitoring { startPolling() }
+    }
+
+    /// Clears the badge when the status menu actually opens. Watching the menu
+    /// is the reliable signal: SwiftUI rebuilds the menu's content whenever the
+    /// icon changes, so clearing from the content view would wipe the badge the
+    /// instant it appeared.
+    private func observeMenuOpening() {
+        menuObserver = NotificationCenter.default.addObserver(
+            forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            // Delivered on the main queue, so this is already main-actor work.
+            guard let monitor = self else { return }
+            MainActor.assumeIsolated { monitor.markSeen() }
+        }
     }
 
     // MARK: - Polling
@@ -47,12 +68,12 @@ final class MailMonitor {
             while !Task.isCancelled {
                 await self?.pollOnce()
                 guard !Task.isCancelled else { break }
-                // Prefer server push: IDLE suspends until new mail arrives
-                // (re-issued within the 29-minute protocol limit). When push
-                // isn't available, fall back to interval polling.
-                let pushed = await MailWorker.shared.waitForNewMail(window: 25 * 60)
+                // Prefer server push: IDLE suspends until new mail arrives.
+                // When push isn't available, fall back to interval polling.
+                let pushed = await MailWorker.shared.waitForNewMail(window: Self.idleWindow)
+                guard !Task.isCancelled else { break }
                 if !pushed {
-                    try? await Task.sleep(for: .seconds(AppSettings.pollInterval))
+                    await self?.waitBeforeRetry()
                 }
             }
         }
@@ -61,8 +82,19 @@ final class MailMonitor {
     private func stopPolling() {
         pollTask?.cancel()
         pollTask = nil
+        retryTask?.cancel()
+        retryTask = nil
         // Unblock a task suspended inside IDLE so it can observe cancellation.
         Task { await MailWorker.shared.wakeIdle() }
+    }
+
+    /// Fallback wait when the server can't push. Kept interruptible so a
+    /// manual check doesn't have to sit out the whole interval.
+    private func waitBeforeRetry() async {
+        let task = Task { _ = try? await Task.sleep(for: .seconds(AppSettings.pollInterval)) }
+        retryTask = task
+        await task.value
+        retryTask = nil
     }
 
     /// The user opened the menu — the green dot has served its purpose.
@@ -70,15 +102,16 @@ final class MailMonitor {
         unseenCount = 0
     }
 
-    /// Menu action: check immediately, whether the loop is idling or stopped.
+    /// Menu action: check now. While the monitor loop is running, nudge it
+    /// awake rather than polling here — two callers must never drive the same
+    /// IMAP session at once, or their commands and responses interleave.
     func processNow() async {
-        if isMonitoring {
-            await MailWorker.shared.wakeIdle()
-            // If the loop was between polls rather than idling, run directly.
-            if !isProcessing { await pollOnce() }
-        } else {
+        guard isMonitoring else {
             await pollOnce()
+            return
         }
+        retryTask?.cancel()
+        await MailWorker.shared.wakeIdle()
     }
 
     func pollOnce() async {

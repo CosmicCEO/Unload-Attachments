@@ -3,11 +3,15 @@ import OSLog
 
 nonisolated enum MailWorkerError: LocalizedError {
     case notConfigured
+    case replacementFailed(archiveMailbox: String, reason: String)
 
     var errorDescription: String? {
         switch self {
         case .notConfigured:
             return "No mail account configured — choose “Mail Account…” from the menu."
+        case .replacementFailed(let mailbox, let reason):
+            return "Attachments were saved, but the slimmed copy could not be put back "
+                + "in the Inbox (\(reason)). The untouched original is safe in “\(mailbox)”."
         }
     }
 }
@@ -142,8 +146,14 @@ actor MailWorker {
                 // Preserve the original before anything replaces it.
                 try await ensureOriginalsMailbox()
                 try await client.uidMove(uid: uid, to: Self.originalsMailbox)
-                try await client.append(mailbox: "INBOX", flags: flags,
-                                        internalDate: fetched.internalDate, message: slimmed)
+                do {
+                    try await client.append(mailbox: "INBOX", flags: flags,
+                                            internalDate: fetched.internalDate, message: slimmed)
+                } catch {
+                    // The original has already left the Inbox — say where.
+                    throw MailWorkerError.replacementFailed(archiveMailbox: Self.originalsMailbox,
+                                                            reason: error.localizedDescription)
+                }
             case .delete:
                 // Only remove the original once the slimmed copy is safely stored.
                 try await client.append(mailbox: "INBOX", flags: flags,
