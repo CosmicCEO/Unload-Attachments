@@ -78,5 +78,4 @@ in-email links that work from any device. See
 
 ## Status
 
-Actively developed. The IMAP backend lives on the `imap-backend` branch
-pending merge to `main`.
+Actively developed.
